@@ -1,0 +1,17 @@
+{
+    "name": "ASE32 Swap",
+    "version": "0.2.0",
+    "description": "small libary for swapping on the ESP32",
+    "authors": [
+        {
+            "name": "Amber-Sophia Schröck",
+            "email": "ambersophia.schroeck@outlook.de"
+        }
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/dein-repo/ase32-swap"
+    },
+    "frameworks": "espidf",
+    "platforms": "espressif32"
+}
