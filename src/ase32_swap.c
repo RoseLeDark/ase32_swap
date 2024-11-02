@@ -1,9 +1,12 @@
+#include "ase32_swap.h"
+#include "ase32_swap_crypt.h"
+#include "ase32_swap_compress.h"
+#include "ase32_swap_debug.h"
+
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_attr.h"
-//#include "esp_private/mmu_psram.h"
-//#include "esp_private/esp_mmu.h"
 #include <string.h>
 
 #include "esp_private/esp_mmu_map_private.h"
@@ -12,32 +15,8 @@
 #include <esp_private/mmu_psram_flash.h>
 #include <esp_heap_caps.h>
 
-#include "ase32_swap.h"
-#include "private/ase32_swap_secure.h"
+#include "esp_timer.h"
 
-
-
-esp_err_t ase32_sswap_in_page(swap_page_t* page);
-
-#if AASE32_SWAP_PAGE_FAULT_HANGLE == 1
-static void IRAM_ATTR handle_page_fault(ase32_swap_t* swap, void* arg,  uint32_t addr) {
-    // Betroffene Seite finden
-    swap_page_t* page = NULL;
-    for (int i = 0; i < swap->page_count; i++) {
-        if (swap->pages[i].virt_addr <= addr &&
-            swap->pages[i].virt_addr + swap->page_count > addr) {
-            page = &swap->pages[i];
-            break;
-        }
-    }
-
-    if (page && !page->is_in_memory) {
-        if (ase32_sswap_in_page(page) != ESP_OK) {
-            ESP_LOGE(TAG, "Konnte Seite nicht laden: 0x%08x", addr);
-        }
-    }
-} 
-#else
 static void IRAM_ATTR handle_page_fault(ase32_swap_t* swap, void* arg, uint32_t addr) {
     // Betroffene Seite finden
     swap_page_t* page = NULL;
@@ -67,15 +46,15 @@ static void IRAM_ATTR handle_page_fault(ase32_swap_t* swap, void* arg, uint32_t 
         }
 
         page->partition_offset = swap->page_count * swap->config.block_size;
-        page->is_dirty = false;
-        page->is_in_memory = true;
+        page->is_dirty = 0;
+        page->is_in_memory = 1;
         page->last_access = swap->access_counter++;
         page->access_count = 0;
 
         // MMU-Mapping erstellen
         esp_err_t err = esp_mmu_map(page->phys_addr, swap->config.block_size, MMU_TARGET_PSRAM0, MMU_MEM_CAP_8BIT, 0, (void**)&(page->virt_addr));
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "MMU-Mapping fehlgeschlagen: %s", esp_err_to_name(err));
+            ESP_LOGE("swap", "MMU-Mapping fehlgeschlagen: %s", esp_err_to_name(err));
             heap_caps_free((void*)page->phys_addr);
             swap->page_count--;
             return;
@@ -85,11 +64,10 @@ static void IRAM_ATTR handle_page_fault(ase32_swap_t* swap, void* arg, uint32_t 
     // Seite in Speicher laden, wenn sie nicht bereits geladen ist
     if (page && !page->is_in_memory) {
         if (ase32_sswap_in_page(page) != ESP_OK) {
-            ESP_LOGE(TAG, "Konnte Seite nicht laden: 0x%08x", addr);
+            ESP_LOGE("swap", "Konnte Seite nicht laden: 0x%08x", addr);
         }
     }
 }
-#endif
 
 esp_err_t ase32_swap_init_partition(const ase32_swap_cfg_t cfg, ase32_swap_t* out);
 esp_err_t ase32_swap_init_file(const ase32_swap_cfg_t cfg, ase32_swap_t* out);
@@ -103,7 +81,7 @@ esp_err_t ase32_swap_init(const ase32_swap_cfg_t cfg, ase32_swap_t* out) {
     out->config = cfg;
 
     if(out->config.cached_pages < 32) out->config.cached_pages = 32;
-    if(out->config.block_size < 512) out->config.block_size = ASE32_SWAP_BLOCK_SIZE_4096;
+    if(out->config.block_size < 32) out->config.block_size = ASE32_SWAP_BLOCK_SIZE_4096;
 
     out->pages = (swap_page_t*)heap_caps_malloc(sizeof(swap_page_t) * cfg.max_pages, MALLOC_CAP_8BIT);
     if (out->pages == NULL) {
@@ -174,7 +152,7 @@ esp_err_t ase32_swap_flush(ase32_swap_t* swap) {
                 // In Datei schreiben
                 fseek(swap->file, offset, SEEK_SET);
                 if (fwrite(data, 1, swap->config.block_size, swap->file) != swap->config.block_size) {
-                    ESP_LOGE(TAG, "Fehler beim Schreiben der Seite in die Datei");
+                    ESP_LOGE("swap", "Fehler beim Schreiben der Seite in die Datei");
                     ret = ESP_ERR_NO_MEM;
                 }
                 fflush(swap->file);
@@ -182,12 +160,12 @@ esp_err_t ase32_swap_flush(ase32_swap_t* swap) {
                 // In Partition schreiben
                 ret = esp_partition_write(swap->partition, offset, data, swap->config.block_size);
                 if (ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Fehler beim Schreiben der Seite in die Partition: %s", esp_err_to_name(ret));
+                    ESP_LOGE("swap", "Fehler beim Schreiben der Seite in die Partition: %s", esp_err_to_name(ret));
                 }
             }
 
             if (ret == ESP_OK) {
-                page->is_dirty = false;
+                page->is_dirty = 0;
             }
         }
     }
@@ -209,9 +187,9 @@ void ase32_swap_free(ase32_swap_t* swap, void* ptr) {
             }
             // Virtuelle Adresse ungültig machen
             page->virt_addr = 0;
-            page->is_in_memory = false;
-            page->is_dirty = false;
-            page->is_used = false;
+            page->is_in_memory = 0;
+            page->is_dirty = 0;
+            page->is_used = 0;
 
             // Zugriffszähler und letzte Zugriffszeit zurücksetzen
             page->access_count = 0;
@@ -219,7 +197,7 @@ void ase32_swap_free(ase32_swap_t* swap, void* ptr) {
 
             // Optional: Debug-Informationen ausgeben
             if (ase32_swap_debug_trace) {
-                ase32_swap_debug_trace(ESP_LOG_INFO, "Seite freigegeben: 0x%08x", ptr);
+                ase32_swap_debug_trace(ESP_LOG_INFO, "Seite freigegeben");
             }
 
             return;
@@ -228,7 +206,7 @@ void ase32_swap_free(ase32_swap_t* swap, void* ptr) {
 
     // Optional: Warnung ausgeben, wenn keine passende Seite gefunden wurde
     if (ase32_swap_debug_trace) {
-        ase32_swap_debug_trace(ESP_LOG_WARN, "Keine Seite gefunden für: 0x%08x", ptr);
+        ase32_swap_debug_trace(ESP_LOG_WARN, "Keine Seite gefunden");
     }
 }
 
@@ -253,11 +231,12 @@ void* ase32_swap_malloc(ase32_swap_t* swap, size_t size) {
         page->virt_addr = virt_addr + (i * swap->config.block_size);
         page->phys_addr = (uint32_t)heap_caps_malloc(swap->config.block_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
         page->partition_offset = i * swap->config.block_size;
-        page->is_dirty = false;
-        page->is_in_memory = true;
+        page->is_dirty = 0;
+        page->is_in_memory = 1;
         page->last_access = swap->access_counter++;
         page->access_count = 0;
-        page->is_used = true;  // Hier setzen wir is_used auf true
+        page->timestamp = esp_timer_get_time();
+        page->is_used = 1;  // Hier setzen wir is_used auf 1
 
         if (!page->phys_addr) {
             // Wenn nicht genug RAM, frühere Seiten freigeben
@@ -295,9 +274,34 @@ void ase32_swap_mark_dirty(ase32_swap_t* swap, void* ptr, size_t size) {
         swap_page_t* page = &swap->pages[i];
         if (page->virt_addr + swap->config.block_size > start_addr &&
             page->virt_addr < end_addr) {
-            page->is_dirty = true;
+            page->is_dirty = 1;
+            page->timestamp = esp_timer_get_time();
+            page->access_count++;
         }
     }
+}
+
+void* ase32_swap_memcpy(ase32_swap_t* swap, void* dest, const void* src, size_t s ) {
+    bool is_src = 0, is_dest = 0;
+
+    for (int i = 0; i < swap->page_count; i++) { 
+        swap_page_t* page = &swap->pages[i];
+        if (  page->virt_addr == dest) {
+            page->last_access++;
+            page->access_count++;
+            page->timestamp = esp_timer_get_time();
+            is_dest = 1;
+        } else if( page->virt_addr == src) {
+            page->last_access++;
+            page->access_count++;
+            page->timestamp = esp_timer_get_time();
+            is_src = 1;
+        }
+
+        if(is_src && is_dest) 
+            break;
+    }
+    return memcpy(dest, src, s);
 }
 
 esp_err_t ase32_swap_init_partition(const ase32_swap_cfg_t cfg, ase32_swap_t* out) {
@@ -315,6 +319,33 @@ esp_err_t ase32_swap_init_partition(const ase32_swap_cfg_t cfg, ase32_swap_t* ou
     // Maximal mögliche Seiten berechnen
     out->physic_size = out->partition->size;
     out->config.max_pages = out->physic_size / cfg.block_size;
+
+    if (out->config.cached_pages > out->config.max_pages) {
+        ESP_LOGW("MMU_CACHE", "Adjusting num_pages from %d to %d based on partition size",
+                 out->config.cached_pages, out->config.max_pages);
+        out->config.cached_pages = out->config.max_pages;
+    }
+
+     // Initialize partition header if needed
+    uint32_t magic;
+    esp_err_t err = esp_partition_read(out->partition, 0, &magic, sizeof(magic));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+     if (magic != ASE32_SWAP_PARTITION_MAGIC) {
+        // Initialize partition
+        magic = ASE32_SWAP_PARTITION_MAGIC;
+        err = esp_partition_erase_range(out->partition, 0, out->physic_size);
+        if (err != ESP_OK) {
+            return err;
+        }
+       
+        err = esp_partition_write(out->partition, 0, &magic, sizeof(magic));
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
 
 
     // Cache-Puffer allokieren
@@ -348,7 +379,7 @@ esp_err_t ase32_swap_init_file(const ase32_swap_cfg_t cfg, ase32_swap_t* out)  {
 
     out->file = fopen(cfg.storage_name, "rb+");
     if (out->file == NULL) {
-        ESP_LOGE(TAG, "Konnte Datei nicht öffnen: %s", cfg.storage_name);
+        ESP_LOGE("swap", "Konnte Datei nicht öffnen: %s", cfg.storage_name);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -360,9 +391,16 @@ esp_err_t ase32_swap_init_file(const ase32_swap_cfg_t cfg, ase32_swap_t* out)  {
     // Maximal mögliche Seiten berechnen
     out->config.max_pages = out->physic_size / cfg.block_size;
 
+    if (out->config.cached_pages > out->config.max_pages) {
+        ESP_LOGW("MMU_CACHE", "Adjusting num_pages from %d to %d based on partition size",
+                 out->config.cached_pages, out->config.max_pages);
+        out->config.cached_pages = out->config.max_pages;
+    }
+
     // Cache-Puffer allokieren
     out->cache_size = (uint32_t)cfg.block_size * cfg.cached_pages;
     out->cache_buffer = heap_caps_malloc(out->cache_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+
     if (out->cache_buffer == NULL) {
         if (ase32_swap_debug_trace)
             ase32_swap_debug_trace(ESP_LOG_ERROR, "Cache-Allokation fehlgeschlagen");
@@ -385,25 +423,168 @@ esp_err_t ase32_swap_init_file(const ase32_swap_cfg_t cfg, ase32_swap_t* out)  {
     return ESP_OK;
 }
 
-void ase32_swap_dump(const ase32_swap_t* swap) {
-    if (swap == NULL) return;
 
-    printf("Swap System Dump:\n");
-    printf("Total Pages: %d\n", swap->page_count);
-    printf("Max Pages: %d\n", swap->config.max_pages);
-    printf("Block Size: %d\n", swap->config.block_size);
-    printf("Cached Pages: %d\n\n", swap->config.cached_pages);
 
-    for (uint32_t i = 0; i < swap->page_count; i++) {
-        const swap_page_t* page = &swap->pages[i];
-        printf("Page %d:\n", i);
-        printf("  Virt Addr: 0x%08x\n", page->virt_addr);
-        printf("  Phys Addr: 0x%08x\n", page->phys_addr);
-        printf("  Partition Offset: %d\n", page->partition_offset);
-        printf("  Dirty: %s\n", page->is_dirty ? "Yes" : "No");
-        printf("  In Memory: %s\n", page->is_in_memory ? "Yes" : "No");
-        printf("  Last Access: %d\n", page->last_access);
-        printf("  Access Count: %d\n", page->access_count);
-        printf("  Used: %s\n\n", page->is_used ? "Yes" : "No");
+//Schreibt eine Seite in die Partition oder Datei
+esp_err_t ase32_swap_out_page(ase32_swap_t* swap, swap_page_t* page) {
+    if(page->is_used == 1) return ESP_ERR_INVALID_STATE;
+
+    if (!page->is_dirty || !page->is_in_memory) {
+        return ESP_OK;
     }
+
+    // Temporärer Puffer für Kompression
+    void* temp_buffer = heap_caps_malloc(swap->config.block_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!temp_buffer) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t compressed_size = swap->config.block_size;
+    esp_err_t ret = ase32_compress_page(swap, (void*)page->phys_addr, temp_buffer, &compressed_size);
+    if(ret != ESP_OK) return ret;
+
+    
+    // Verschlüssele die komprimierten Daten
+    ret = ase32_encrypt_page(swap, temp_buffer, compressed_size);
+    if(ret != ESP_OK) return ret;
+
+    if(swap->config.storage_type == ASE32_SWAP_STORAGE_FILE && swap->file) {
+        fseek(swap->file, page->partition_offset, SEEK_SET);
+        // Schreibe zuerst die komprimierte Größe
+        fwrite(&compressed_size, sizeof(size_t), 1, swap->file);
+        // Dann die Daten
+        size_t written = fwrite(temp_buffer, 1, compressed_size, swap->file);
+        if (written != compressed_size) {
+            ret = ESP_FAIL;
+        }
+        fflush(swap->file);
+    } else if (swap->config.storage_type == ASE32_SWAP_STORAGE_PARTITION && swap->partition) {
+        // Schreibe zuerst die komprimierte Größe
+        ret = esp_partition_write(swap->partition, page->partition_offset, 
+                                &compressed_size, sizeof(size_t));
+        if(ret != ESP_OK) return ret;
+
+        // Dann die Daten
+        ret = esp_partition_write(swap->partition, 
+                                page->partition_offset + sizeof(size_t),
+                                temp_buffer, compressed_size);
+        if(ret != ESP_OK) return ret;
+        
+    }
+    
+    heap_caps_free(temp_buffer);
+
+    page->is_dirty = 0;
+    heap_caps_free((void*)page->phys_addr);
+    page->phys_addr = 0;
+    page->is_in_memory = 0;
+
+    
+    return ret;
+}
+
+//Lädt eine Seite aus der Partition oder Datei
+esp_err_t ase32_swap_in_page(ase32_swap_t* swap, swap_page_t* page) {
+    if (page->is_in_memory) {
+        return ESP_OK;
+    }
+
+    if (!page->phys_addr) {
+        page->phys_addr = (uint32_t)heap_caps_malloc(swap->config.block_size, 
+                                                    MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+        if (!page->phys_addr) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    // Temporärer Puffer für komprimierte Daten
+    void* temp_buffer = heap_caps_malloc(swap->config.block_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!temp_buffer) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = ESP_OK;
+    size_t compressed_size = 0;
+
+    // Lese die komprimierte Größe
+    if (swap->file) {
+        fseek(swap->file, page->partition_offset, SEEK_SET);
+        if (fread(&compressed_size, sizeof(size_t), 1, swap->file) != 1) {
+            ret = ESP_FAIL;
+        } else {
+            // Lese die komprimierten Daten
+            if (fread(temp_buffer, 1, compressed_size, swap->file) != compressed_size) {
+                ret = ESP_FAIL;
+            }
+        }
+    } else if (swap->partition) {
+        ret = esp_partition_read(swap->partition, page->partition_offset, 
+                               &compressed_size, sizeof(size_t));
+        if(ret != ESP_OK) return ret;
+        
+        ret = esp_partition_read(swap->partition, 
+                                page->partition_offset + sizeof(size_t),
+                                temp_buffer, compressed_size);
+        if(ret != ESP_OK) return ret;
+
+    }
+
+    // Entschlüssele die Daten
+    ret = ase32_decrypt_page(swap, temp_buffer, compressed_size);
+    if(ret != ESP_OK) return ret;
+
+    // Dekomprimiere die Daten
+    ret = ase32_decompress_page(swap, temp_buffer, compressed_size, (void*)page->phys_addr);
+    if(ret != ESP_OK) return ret;
+
+
+    heap_caps_free(temp_buffer);
+
+    // Aktualisiere MMU-Mapping
+    ret = esp_mmu_map(page->phys_addr, swap->config.block_size, 
+                        MMU_TARGET_PSRAM0, 
+                        MMU_MEM_CAP_8BIT | MMU_MEM_CAP_READ | MMU_MEM_CAP_WRITE, 
+                        0, (void**)&(page->virt_addr));
+    if(ret != ESP_OK) return ret;
+        
+
+    page->is_in_memory = 1;
+    page->last_access = swap->access_counter++;
+    page->access_count++;
+
+    
+
+    return ret;
+
+}
+
+void ase32_swap_defragment(ase32_swap_t* swap, ase32_swap_defrag_callback callback) {
+    size_t total_moves = 0;
+    size_t completed_moves = 0;
+    
+    // Zähle notwendige Bewegungen
+    for (size_t i = 0; i < swap->page_count; i++) {
+        if (!swap->pages[i].is_used && i < swap->page_count - 1) {
+            total_moves++;
+        }
+    }
+    
+    // Defragmentierung durchführen
+    size_t write_pos = 0;
+    for (size_t read_pos = 0; read_pos < swap->page_count; read_pos++) {
+        if (swap->pages[read_pos].is_used) {
+            if (write_pos != read_pos) {
+                memcpy(&swap->pages[write_pos], &swap->pages[read_pos], sizeof(swap_page_t));
+                swap->pages[write_pos].phys_addr = write_pos * sizeof(swap_page_t);
+                completed_moves++;
+                
+                if (callback) {
+                    callback((float)completed_moves / total_moves);
+                }
+            }
+            write_pos++;
+        }
+    }
+    
+    swap->page_count = write_pos;
 }
