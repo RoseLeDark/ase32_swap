@@ -424,6 +424,7 @@ esp_err_t ase32_swap_init_file(const ase32_swap_cfg_t cfg, ase32_swap_t* out)  {
 }
 
 
+#include "ase32_swap_mmu.h"
 
 //Schreibt eine Seite in die Partition oder Datei
 esp_err_t ase32_swap_out_page(ase32_swap_t* swap, swap_page_t* page) {
@@ -474,14 +475,18 @@ esp_err_t ase32_swap_out_page(ase32_swap_t* swap, swap_page_t* page) {
     
     heap_caps_free(temp_buffer);
 
-    page->is_dirty = 0;
+    /*page->is_dirty = 0;
     heap_caps_free((void*)page->phys_addr);
     page->phys_addr = 0;
-    page->is_in_memory = 0;
+    page->is_in_memory = 0;*/
+
+    ret = ase32_swap_unregist_page(page);
 
     
     return ret;
 }
+
+
 
 //Lädt eine Seite aus der Partition oder Datei
 esp_err_t ase32_swap_in_page(ase32_swap_t* swap, swap_page_t* page) {
@@ -541,7 +546,9 @@ esp_err_t ase32_swap_in_page(ase32_swap_t* swap, swap_page_t* page) {
     heap_caps_free(temp_buffer);
 
     // Aktualisiere MMU-Mapping
-    ret = esp_mmu_map(page->phys_addr, swap->config.block_size, 
+    ret = ase32_swap_register_page(swap, page);
+
+    /*ret = esp_mmu_map(page->phys_addr, swap->config.block_size, 
                         MMU_TARGET_PSRAM0, 
                         MMU_MEM_CAP_8BIT | MMU_MEM_CAP_READ | MMU_MEM_CAP_WRITE, 
                         0, (void**)&(page->virt_addr));
@@ -550,7 +557,7 @@ esp_err_t ase32_swap_in_page(ase32_swap_t* swap, swap_page_t* page) {
 
     page->is_in_memory = 1;
     page->last_access = swap->access_counter++;
-    page->access_count++;
+    page->access_count++;*/
 
     
 
