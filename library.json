@@ -1,6 +1,6 @@
 {
     "name": "ASE32 Swap",
-    "version": "0.2.0",
+    "version": "0.3.5",
     "description": "small libary for swapping on the ESP32",
     "authors": [
         {
@@ -10,7 +10,7 @@
     ],
     "repository": {
         "type": "git",
-        "url": "https://github.com/dein-repo/ase32-swap"
+        "url": "https://github.com/RoseLeDark/ase32_swap"
     },
     "frameworks": "espidf",
     "platforms": "espressif32"
