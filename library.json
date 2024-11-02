@@ -2,6 +2,7 @@
     "name": "ASE32 Swap",
     "version": "0.3.5",
     "description": "small libary for swapping on the ESP32",
+    "license": "eupl",
     "authors": [
         {
             "name": "Amber-Sophia Schröck",
